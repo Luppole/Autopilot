@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Free Model Router</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%2314233a' stroke='%232747d9' stroke-width='4'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead__title">
+      <h1>Free Model Router</h1>
+      <p>Each request goes to a free OpenRouter model. Busy ones are skipped until one answers.</p>
+    </div>
+    <div class="masthead__status">
+      <p id="sync-status" aria-live="polite">Loading models…</p>
+      <button id="sync-button" class="button button--quiet" type="button">Sync now</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="exchange" aria-label="Switchboard">
+      <div class="board">
+        <div class="board__head">
+          <h2>Switchboard</h2>
+          <p id="board-hint">Pick a line to pin it, or leave it on auto.</p>
+        </div>
+        <ol id="jacks" class="jacks"></ol>
+        <ul class="legend" aria-label="Line states">
+          <li><span class="dot dot--live"></span>Answered</li>
+          <li><span class="dot dot--busy"></span>Busy or failed</li>
+          <li><span class="dot dot--new"></span>New since last sync</li>
+        </ul>
+      </div>
+
+      <form id="console" class="console">
+        <label for="prompt">Ask a free model</label>
+        <textarea id="prompt" rows="5" placeholder="Explain what an API is in simple terms." required></textarea>
+        <div class="console__actions">
+          <span id="route-mode" class="route-mode">Auto: any free line</span>
+          <button id="send-button" class="button" type="submit">Send</button>
+        </div>
+        <div id="reply" class="reply" hidden>
+          <p id="reply-meta" class="reply__meta"></p>
+          <div id="reply-text" class="reply__text"></div>
+        </div>
+      </form>
+    </section>
+
+    <section class="ledger">
+      <div class="panel">
+        <h2>Sync log</h2>
+        <ol id="history" class="timeline"></ol>
+      </div>
+
+      <div class="panel panel--wide">
+        <div class="panel__head">
+          <h2>Models</h2>
+          <input id="filter" type="search" placeholder="Filter by name or provider" aria-label="Filter models">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col" class="num">Context</th>
+                <th scope="col">Input</th>
+                <th scope="col">Released</th>
+              </tr>
+            </thead>
+            <tbody id="models"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel connect">
+      <h2>Connect a client</h2>
+      <div class="connect__grid">
+        <div>
+          <h3>OpenAI SDKs</h3>
+          <pre><code>base_url = "<span class="origin"></span>/v1"
+model    = "auto"</code></pre>
+        </div>
+        <div>
+          <h3>Claude Code and Anthropic SDKs</h3>
+          <pre><code>ANTHROPIC_BASE_URL=<span class="origin"></span>
+ANTHROPIC_AUTH_TOKEN=anything</code></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

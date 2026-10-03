@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "free-model-router"
+version = "0.1.0"
+description = "A local OpenAI- and Anthropic-compatible router that spreads requests across OpenRouter's free models."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = [
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "requests>=2.31",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx",
+    "mypy",
+    "pytest",
+    "ruff",
+    "types-requests",
+]
+
+[project.scripts]
+free-router = "free_router.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+free_router = ["web/*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM", "RUF"]
+ignore = [
+    "B008",    # FastAPI's `Body(...)` defaults are the intended idiom.
+    "RUF001",  # "…" in user-facing strings is deliberate.
+]
+
+[tool.mypy]
+files = ["src", "tests"]
+python_version = "3.10"
+strict = true
+# Request/response bodies are free-form JSON.
+disallow_any_generics = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+filterwarnings = ["error"]
