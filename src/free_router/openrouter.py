@@ -35,7 +35,10 @@ def fetch_models() -> list[dict[str, Any]]:
     return [model for model in models if isinstance(model, dict)]
 
 
-def post_chat(payload: dict[str, Any], stream: bool = False) -> requests.Response:
+def post_chat(payload: dict[str, Any], timeout: float) -> requests.Response:
+    """Send a chat request. The body is left unread, so the caller can
+    stream it or read it under its own deadline, and must close it."""
+
     return _session.post(
         OPENROUTER_CHAT_URL,
         headers={
@@ -43,6 +46,6 @@ def post_chat(payload: dict[str, Any], stream: bool = False) -> requests.Respons
             "X-Title": APP_TITLE,
         },
         json=payload,
-        timeout=settings.request_timeout,
-        stream=stream,
+        timeout=(min(settings.connect_timeout, timeout), timeout),
+        stream=True,
     )

@@ -62,6 +62,7 @@ The requested Claude model name is ignored and a free model is used instead. Too
   - **Output limit:** a `max_tokens` above what a model allows is lowered to fit, so a client asking for 32k tokens isn't rejected by an 8k model.
 - A specific model id is tried once, with no fallback. It must be one of the synced free models, so a typo can never send a request to a paid model on your key.
 - A non-2xx reply, a network error, a timeout, a non-JSON body or a reply with no choices counts as a miss, and the next model is tried. After a 429 there's a short pause first.
+- Each request has an overall deadline (10 minutes by default). Each model's timeout is capped by the time left, and once it runs out the request fails with `504` instead of trying more models. For non-streaming requests the deadline covers the whole reply; for streams it covers getting the stream started.
 - A malformed request (for example, no `messages`) is rejected with `400` before any model is called.
 - Successful responses include `X-Router-Model` (who answered) and `X-Router-Attempts` (who was skipped, with status codes).
 
@@ -84,6 +85,7 @@ Errors use the shape each client already understands:
 | `500` | `OPENROUTER_API_KEY` is missing, or an unexpected bug (details go to the server log, not the client). |
 | `502` | A sync couldn't reach OpenRouter. |
 | `503` | No models are synced yet, or every model failed. |
+| `504` | The request deadline passed before any model answered. |
 
 ## API
 
@@ -105,6 +107,8 @@ Errors use the shape each client already understands:
 | `OPENROUTER_API_KEY` | (required) | Used for all chat requests. |
 | `FREE_ROUTER_DATA_DIR` | `./data` | Where the model list and history are stored. |
 | `FREE_ROUTER_REQUEST_TIMEOUT` | `300` | Seconds to wait on one model before moving on. |
+| `FREE_ROUTER_CONNECT_TIMEOUT` | `10` | Seconds to wait for a connection to OpenRouter. |
+| `FREE_ROUTER_REQUEST_DEADLINE` | `600` | Total seconds one request may spend across all models. `0` means no limit. |
 | `FREE_ROUTER_MAX_ATTEMPTS` | `0` | Models to try per request. `0` means all of them. |
 | `FREE_ROUTER_RATE_LIMIT_DELAY` | `0.5` | Seconds to pause after a 429. |
 | `FREE_ROUTER_HISTORY_LIMIT` | `90` | Sync log entries to keep. |

@@ -52,6 +52,11 @@ class Settings:
     history_limit: int = 90
     # Seconds to wait on a single model before moving on.
     request_timeout: float = 300
+    # Seconds to wait for a connection to OpenRouter.
+    connect_timeout: float = 10
+    # Total seconds one request may spend across all models; 0 means
+    # no limit. For streams it covers getting the stream started.
+    request_deadline: float = 600
     # How many models to try per request; 0 means all of them.
     max_attempts: int = 0
     # Pause after a 429 so we don't hammer OpenRouter.
@@ -78,6 +83,12 @@ class Settings:
             ),
             request_timeout=_env_number(
                 "FREE_ROUTER_REQUEST_TIMEOUT", defaults.request_timeout
+            ),
+            connect_timeout=_env_number(
+                "FREE_ROUTER_CONNECT_TIMEOUT", defaults.connect_timeout
+            ),
+            request_deadline=_env_number(
+                "FREE_ROUTER_REQUEST_DEADLINE", defaults.request_deadline
             ),
             max_attempts=int(
                 _env_number("FREE_ROUTER_MAX_ATTEMPTS", defaults.max_attempts)

@@ -1,5 +1,6 @@
 """Fallback routing: try capable free models, healthiest first, until one answers."""
 
+import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -43,9 +44,8 @@ class AllModelsFailed(RouterError):
 
     def __init__(self, attempts: list[Attempt]) -> None:
         self.attempts = attempts
-        last_error = attempts[-1].error if attempts else "no models were tried"
         super().__init__(
-            f"All {len(attempts)} free models failed. Last error: {last_error}"
+            f"All {len(attempts)} free models failed. {_last_error(attempts)}"
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +53,25 @@ class AllModelsFailed(RouterError):
             **super().to_dict(),
             "attempts": [asdict(attempt) for attempt in self.attempts],
         }
+
+
+class DeadlineExceeded(AllModelsFailed):
+    status_code = 504
+    error_type = "deadline_exceeded"
+
+    def __init__(self, attempts: list[Attempt], seconds: float) -> None:
+        super().__init__(attempts)
+        self.message = (
+            f"No free model answered within {seconds:g}s "
+            f"({len(attempts)} tried). {_last_error(attempts)}"
+        )
+        self.args = (self.message,)
+
+
+def _last_error(attempts: list[Attempt]) -> str:
+    if not attempts:
+        return "No models were tried."
+    return f"Last error: {attempts[-1].error}"
 
 
 class _Miss(Exception):
@@ -114,9 +133,9 @@ def candidate_models(payload: Payload, prompt_tokens: int) -> list[Record]:
     return [free_models[model_id] for model_id in ordered]
 
 
-def _open(model_id: str, payload: Payload, stream: bool) -> requests.Response:
+def _open(model_id: str, payload: Payload, timeout: float) -> requests.Response:
     try:
-        response = post_chat({**payload, "model": model_id}, stream=stream)
+        response = post_chat({**payload, "model": model_id}, timeout=timeout)
     except requests.RequestException as error:
         raise _Miss(Attempt(model_id, None, _truncate(str(error)))) from error
 
@@ -128,9 +147,36 @@ def _open(model_id: str, payload: Payload, stream: bool) -> requests.Response:
     return response
 
 
-def _parse(model_id: str, response: requests.Response) -> Payload:
+def _read_body(
+    model_id: str, response: requests.Response, deadline: float | None
+) -> bytes:
+    """Read the whole body, giving up at `deadline`.
+
+    The socket read timeout only bounds gaps between bytes, so a reply
+    that trickles in (e.g. keep-alive whitespace) could outlast it.
+    """
+
+    chunks: list[bytes] = []
+
     try:
-        data = response.json()
+        for chunk in response.iter_content(chunk_size=None):
+            chunks.append(chunk)
+
+            if deadline is not None and time.monotonic() > deadline:
+                raise _Miss(
+                    Attempt(model_id, None, "Request deadline reached mid-reply")
+                )
+    except requests.RequestException as error:
+        raise _Miss(Attempt(model_id, None, _truncate(str(error)))) from error
+    finally:
+        response.close()
+
+    return b"".join(chunks)
+
+
+def _parse(model_id: str, response: requests.Response, body: bytes) -> Payload:
+    try:
+        data = json.loads(body)
     except ValueError:
         raise _Miss(
             Attempt(model_id, response.status_code, "Response was not valid JSON")
@@ -168,24 +214,43 @@ def route(payload: Payload, stream: bool = False) -> RouteResult:
     payload = {**payload, "stream": stream}
     prompt_tokens = estimate_prompt_tokens(payload)
     attempts: list[Attempt] = []
+    deadline = (
+        time.monotonic() + settings.request_deadline
+        if settings.request_deadline
+        else None
+    )
 
     for model in candidate_models(payload, prompt_tokens):
         model_id = model["id"]
         started = time.monotonic()
+        timeout = settings.request_timeout
+
+        if deadline is not None:
+            if started >= deadline:
+                raise DeadlineExceeded(attempts, settings.request_deadline)
+            timeout = min(timeout, deadline - started)
 
         try:
             response = _open(
-                model_id, fit_payload(model, payload, prompt_tokens), stream
+                model_id, fit_payload(model, payload, prompt_tokens), timeout
             )
-            data = None if stream else _parse(model_id, response)
+            data = (
+                None
+                if stream
+                else _parse(
+                    model_id, response, _read_body(model_id, response, deadline)
+                )
+            )
         except _Miss as miss:
             log.info("%s skipped: %s", model_id, miss.attempt.status or miss)
             attempts.append(miss.attempt)
+            out_of_time = deadline is not None and time.monotonic() >= deadline
 
-            if health.is_model_failure(miss.attempt.status):
+            # A model cut short by our deadline didn't necessarily fail.
+            if health.is_model_failure(miss.attempt.status) and not out_of_time:
                 health.record_failure(model_id)
 
-            if miss.attempt.status == 429:
+            if miss.attempt.status == 429 and not out_of_time:
                 time.sleep(settings.rate_limit_delay)
 
             continue
@@ -197,5 +262,8 @@ def route(payload: Payload, stream: bool = False) -> RouteResult:
             return RouteResult(model_id, attempts, response=response)
 
         return RouteResult(model_id, attempts, data=data)
+
+    if deadline is not None and time.monotonic() >= deadline:
+        raise DeadlineExceeded(attempts, settings.request_deadline)
 
     raise AllModelsFailed(attempts)

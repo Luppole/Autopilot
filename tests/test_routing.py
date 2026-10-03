@@ -53,7 +53,7 @@ def test_network_errors_are_skipped(
 ) -> None:
     calls: list[str] = []
 
-    def flaky(payload: dict[str, Any], stream: bool = False) -> FakeResponse:
+    def flaky(payload: dict[str, Any], timeout: float) -> FakeResponse:
         calls.append(payload["model"])
         if len(calls) == 1:
             raise requests.ConnectionError("reset")

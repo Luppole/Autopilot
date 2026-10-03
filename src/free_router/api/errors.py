@@ -25,6 +25,7 @@ ANTHROPIC_ERROR_TYPES = {
     413: "request_too_large",
     429: "rate_limit_error",
     503: "overloaded_error",
+    504: "timeout_error",
 }
 
 
