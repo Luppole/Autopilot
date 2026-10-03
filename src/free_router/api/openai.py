@@ -42,14 +42,14 @@ def chat_completions(
 
 def stream_completion(body: dict[str, Any]) -> StreamingResponse:
     result = route(body, stream=True)
-    response = result.response
-    assert response is not None
+    response, chunks = result.response, result.chunks
+    assert response is not None and chunks is not None
 
     def relay() -> Iterator[bytes]:
         # Pass bytes through untouched so multi-line SSE events and
         # keep-alive comments arrive exactly as OpenRouter sent them.
         try:
-            yield from response.iter_content(chunk_size=None)
+            yield from chunks
         except requests.RequestException as error:
             log.warning("Stream from %s broke off: %s", result.model, error)
         finally:

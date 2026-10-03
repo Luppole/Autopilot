@@ -1,8 +1,10 @@
 """Fallback routing: try capable free models, healthiest first, until one answers."""
 
+import itertools
 import json
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -13,6 +15,7 @@ from free_router.capabilities import estimate_prompt_tokens, fit_payload, unfit_
 from free_router.config import settings
 from free_router.errors import InvalidRequestError, NoModelsError, RouterError
 from free_router.openrouter import post_chat
+from free_router.sse import SSEParser, parse_chunk
 from free_router.storage import Record, load_free_models
 
 log = logging.getLogger(__name__)
@@ -36,6 +39,8 @@ class RouteResult:
     attempts: list[Attempt] = field(default_factory=list)
     data: Payload | None = None
     response: requests.Response | None = None
+    # The stream's raw bytes, starting from the beginning.
+    chunks: Iterator[bytes] | None = None
 
 
 class AllModelsFailed(RouterError):
@@ -199,11 +204,92 @@ def _parse(model_id: str, response: requests.Response, body: bytes) -> Payload:
     return payload
 
 
+def _stream_started(model_id: str, data: str) -> bool:
+    """Whether this stream event shows the model is really answering."""
+
+    if data.strip() == "[DONE]":
+        raise _Miss(Attempt(model_id, None, "Stream ended before any output"))
+
+    chunk = parse_chunk(data)
+
+    if chunk is None:
+        return False
+
+    # Providers can fail after the 200, reporting it as an event.
+    error = chunk.get("error")
+
+    if error is not None:
+        code = error.get("code") if isinstance(error, dict) else None
+        message = error.get("message") if isinstance(error, dict) else error
+        raise _Miss(
+            Attempt(
+                model_id,
+                code if isinstance(code, int) else None,
+                _truncate(str(message)),
+            )
+        )
+
+    choices = chunk.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+
+    if not isinstance(choice, dict):
+        return False
+
+    delta = choice.get("delta")
+
+    if not isinstance(delta, dict):
+        delta = {}
+
+    return bool(
+        delta.get("content")
+        or delta.get("tool_calls")
+        or delta.get("reasoning")
+        or choice.get("finish_reason")
+    )
+
+
+def _start_stream(
+    model_id: str, response: requests.Response, deadline: float | None
+) -> Iterator[bytes]:
+    """Read until the model produces output, so a stream that errors or
+    ends empty can still fall back to the next model. Returns all the
+    bytes, including those already read."""
+
+    source = response.iter_content(chunk_size=None)
+    seen: list[bytes] = []
+    parser = SSEParser()
+
+    try:
+        for chunk in source:
+            seen.append(chunk)
+
+            if any(_stream_started(model_id, data) for data in parser.feed(chunk)):
+                return itertools.chain(seen, source)
+
+            if deadline is not None and time.monotonic() > deadline:
+                raise _Miss(
+                    Attempt(model_id, None, "Request deadline reached before output")
+                )
+
+        if any(_stream_started(model_id, data) for data in parser.finish()):
+            return iter(seen)
+    except requests.RequestException as error:
+        response.close()
+        raise _Miss(Attempt(model_id, None, _truncate(str(error)))) from error
+    except _Miss:
+        response.close()
+        raise
+
+    response.close()
+    raise _Miss(Attempt(model_id, None, "Stream ended before any output"))
+
+
 def route(payload: Payload, stream: bool = False) -> RouteResult:
     """Send `payload` to the first free model that accepts it.
 
-    Non-streaming results carry the parsed JSON in `data`; streaming
-    results carry the open `response`, which the caller must close.
+    Non-streaming results carry the parsed JSON in `data`. Streaming
+    results carry the stream's bytes in `chunks` and the open
+    `response`, which the caller must close.
     """
 
     messages = payload.get("messages")
@@ -234,13 +320,12 @@ def route(payload: Payload, stream: bool = False) -> RouteResult:
             response = _open(
                 model_id, fit_payload(model, payload, prompt_tokens), timeout
             )
-            data = (
-                None
-                if stream
-                else _parse(
+            if stream:
+                chunks = _start_stream(model_id, response, deadline)
+            else:
+                data = _parse(
                     model_id, response, _read_body(model_id, response, deadline)
                 )
-            )
         except _Miss as miss:
             log.info("%s skipped: %s", model_id, miss.attempt.status or miss)
             attempts.append(miss.attempt)
@@ -259,7 +344,7 @@ def route(payload: Payload, stream: bool = False) -> RouteResult:
         log.info("%s answered after %d skipped", model_id, len(attempts))
 
         if stream:
-            return RouteResult(model_id, attempts, response=response)
+            return RouteResult(model_id, attempts, response=response, chunks=chunks)
 
         return RouteResult(model_id, attempts, data=data)
 

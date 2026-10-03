@@ -5,11 +5,13 @@ oddly-typed fields instead of trusting the shape.
 """
 
 import json
+import time
 import uuid
 from collections.abc import Iterable, Iterator
 from typing import Any
 
 from free_router.errors import InvalidRequestError
+from free_router.sse import SSEParser, parse_chunk
 
 Json = dict[str, Any]
 
@@ -276,7 +278,12 @@ def response_to_anthropic(data: Json, model: str) -> Json:
         "role": "assistant",
         "model": model,
         "content": content,
-        "stop_reason": STOP_REASONS.get(choice.get("finish_reason"), "end_turn"),
+        # Some providers report "stop" even when they called a tool.
+        "stop_reason": (
+            "tool_use"
+            if any(block["type"] == "tool_use" for block in content)
+            else STOP_REASONS.get(choice.get("finish_reason"), "end_turn")
+        ),
         "stop_sequence": None,
         "usage": {
             "input_tokens": int(usage.get("prompt_tokens") or 0),
@@ -286,46 +293,229 @@ def response_to_anthropic(data: Json, model: str) -> Json:
 
 
 # ============================================================
-# Streaming: replay a finished message as Anthropic SSE events
+# Streaming: OpenAI chunks -> Anthropic SSE events, as they arrive
 # ============================================================
 
+# Send a `ping` after this many quiet seconds (e.g. while a model
+# reasons, or a long tool call is buffered) so clients don't time out.
+PING_INTERVAL = 10.0
 
-def stream_events(message: Json) -> Iterator[Json]:
-    yield {
-        "type": "message_start",
-        "message": {
-            **message,
-            "content": [],
-            "stop_reason": None,
-            "usage": {
-                "input_tokens": message["usage"]["input_tokens"],
-                "output_tokens": 0,
+
+def stream_error_event(message: str) -> Json:
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
+
+
+class _StreamTranslator:
+    """Text is passed on as it arrives. Each tool call is held until
+    it's complete and then sent whole, with its arguments parsed, so
+    providers' quirks in streaming tool calls can't produce bad JSON."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.index = 0
+        self.text_open = False
+        self.tools: dict[Any, Json] = {}
+        self.last_tool_key: Any = 0
+        self.used_tools = False
+        self.stop_reason = "end_turn"
+        self.usage: Json = {}
+
+    def start(self) -> Json:
+        return {
+            "type": "message_start",
+            "message": {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "type": "message",
+                "role": "assistant",
+                "model": self.model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
             },
-        },
-    }
+        }
 
-    for index, block in enumerate(message["content"]):
-        if block["type"] == "text":
-            start: Json = {"type": "text", "text": ""}
-            delta: Json = {"type": "text_delta", "text": block["text"]}
-        else:
-            start = {**block, "input": {}}
-            delta = {
-                "type": "input_json_delta",
-                "partial_json": json.dumps(block["input"]),
+    def chunk(self, chunk: Json) -> Iterator[Json]:
+        usage = chunk.get("usage")
+
+        if isinstance(usage, dict):
+            self.usage = usage
+
+        choices = chunk.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+
+        if not isinstance(choice, dict):
+            return
+
+        delta = choice.get("delta")
+
+        if isinstance(delta, dict):
+            text = _message_text(delta.get("content"))
+
+            if text:
+                yield from self._text(text)
+
+            for tool_call in _blocks(delta.get("tool_calls")):
+                yield from self._close_text()
+                self._tool_fragment(tool_call)
+
+        finish_reason = choice.get("finish_reason")
+
+        if finish_reason:
+            self.stop_reason = STOP_REASONS.get(finish_reason, "end_turn")
+
+    def finish(self) -> Iterator[Json]:
+        yield from self._close_text()
+        yield from self._flush_tools()
+
+        # Anthropic clients expect at least one block.
+        if self.index == 0:
+            yield from self._text("")
+            yield from self._close_text()
+
+        yield {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "tool_use" if self.used_tools else self.stop_reason,
+                "stop_sequence": None,
+            },
+            "usage": {
+                "input_tokens": int(self.usage.get("prompt_tokens") or 0),
+                "output_tokens": int(self.usage.get("completion_tokens") or 0),
+            },
+        }
+        yield {"type": "message_stop"}
+
+    def _text(self, text: str) -> Iterator[Json]:
+        # Text after tool calls means those calls are complete.
+        yield from self._flush_tools()
+
+        if not self.text_open:
+            self.text_open = True
+            yield {
+                "type": "content_block_start",
+                "index": self.index,
+                "content_block": {"type": "text", "text": ""},
             }
 
-        yield {"type": "content_block_start", "index": index, "content_block": start}
-        yield {"type": "content_block_delta", "index": index, "delta": delta}
-        yield {"type": "content_block_stop", "index": index}
+        if text:
+            yield {
+                "type": "content_block_delta",
+                "index": self.index,
+                "delta": {"type": "text_delta", "text": text},
+            }
 
-    yield {
-        "type": "message_delta",
-        "delta": {"stop_reason": message["stop_reason"], "stop_sequence": None},
-        "usage": {"output_tokens": message["usage"]["output_tokens"]},
-    }
+    def _close_text(self) -> Iterator[Json]:
+        if self.text_open:
+            self.text_open = False
+            yield {"type": "content_block_stop", "index": self.index}
+            self.index += 1
 
-    yield {"type": "message_stop"}
+    def _tool_fragment(self, tool_call: Json) -> None:
+        # Calls are told apart by `index`; some providers only send `id`,
+        # and fragments with neither continue the previous call.
+        key = tool_call.get("index")
+
+        if key is None:
+            key = tool_call.get("id") or self.last_tool_key
+
+        self.last_tool_key = key
+        tool = self.tools.setdefault(key, {"id": None, "name": "", "arguments": ""})
+
+        if tool_call.get("id") and not tool["id"]:
+            tool["id"] = str(tool_call["id"])
+
+        function = tool_call.get("function")
+
+        if not isinstance(function, dict):
+            return
+
+        if function.get("name") and not tool["name"]:
+            tool["name"] = str(function["name"])
+
+        arguments = function.get("arguments")
+
+        if isinstance(arguments, dict):
+            tool["arguments"] = json.dumps(arguments)
+        elif isinstance(arguments, str):
+            tool["arguments"] += arguments
+
+    def _flush_tools(self) -> Iterator[Json]:
+        for tool in self.tools.values():
+            block = {
+                "type": "tool_use",
+                "id": tool["id"] or f"toolu_{uuid.uuid4().hex}",
+                "name": tool["name"],
+                "input": {},
+            }
+            arguments = json.dumps(_parse_arguments(tool["arguments"]))
+
+            yield {
+                "type": "content_block_start",
+                "index": self.index,
+                "content_block": block,
+            }
+            yield {
+                "type": "content_block_delta",
+                "index": self.index,
+                "delta": {"type": "input_json_delta", "partial_json": arguments},
+            }
+            yield {"type": "content_block_stop", "index": self.index}
+            self.index += 1
+            self.used_tools = True
+
+        self.tools.clear()
+
+
+def stream_to_anthropic(chunks: Iterable[bytes], model: str) -> Iterator[Json]:
+    """Translate a raw OpenAI SSE byte stream into Anthropic events."""
+
+    translator = _StreamTranslator(model)
+    parser = SSEParser()
+    last_sent = time.monotonic()
+
+    yield translator.start()
+
+    for raw in chunks:
+        events: list[Json] = []
+
+        for data in parser.feed(raw):
+            if data.strip() == "[DONE]":
+                yield from events
+                yield from translator.finish()
+                return
+
+            chunk = parse_chunk(data)
+
+            if chunk is None:
+                continue
+
+            error = chunk.get("error")
+
+            if error is not None:
+                message = error.get("message") if isinstance(error, dict) else error
+                yield from events
+                yield stream_error_event(f"Upstream error: {message}")
+                return
+
+            events.extend(translator.chunk(chunk))
+
+        now = time.monotonic()
+
+        if events:
+            yield from events
+            last_sent = now
+        elif now - last_sent >= PING_INTERVAL:
+            yield {"type": "ping"}
+            last_sent = now
+
+    for data in parser.finish():
+        chunk = parse_chunk(data)
+
+        if chunk is not None:
+            yield from translator.chunk(chunk)
+
+    yield from translator.finish()
 
 
 def encode_sse(events: Iterable[Json]) -> Iterator[bytes]:
