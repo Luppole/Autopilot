@@ -54,6 +54,8 @@ export ANTHROPIC_AUTH_TOKEN=unused
 
 The requested Claude model name is ignored and a free model is used instead. Tool use is translated in both directions.
 
+With `stream: true`, text is passed on as the model writes it. Each tool call is held back until it's complete and then sent in one piece, so a provider's quirks in streaming tool arguments can't produce broken JSON. During long silences (a model reasoning, or a large tool call being collected) the server sends `ping` events so clients don't time out.
+
 ## How routing works
 
 - `model: "auto"` (or no model) tries every free model that can handle the request:
@@ -62,6 +64,7 @@ The requested Claude model name is ignored and a free model is used instead. Too
   - **Output limit:** a `max_tokens` above what a model allows is lowered to fit, so a client asking for 32k tokens isn't rejected by an 8k model.
 - A specific model id is tried once, with no fallback. It must be one of the synced free models, so a typo can never send a request to a paid model on your key.
 - A non-2xx reply, a network error, a timeout, a non-JSON body or a reply with no choices counts as a miss, and the next model is tried. After a 429 there's a short pause first.
+- For streams, a model only counts as answering once it produces output. A stream that errors or ends before any output is a miss like any other, so the next model is tried. An error after output has started can't be retried: it ends the stream (with an `error` event on `/v1/messages`).
 - Each request has an overall deadline (10 minutes by default). Each model's timeout is capped by the time left, and once it runs out the request fails with `504` instead of trying more models. For non-streaming requests the deadline covers the whole reply; for streams it covers getting the stream started.
 - A malformed request (for example, no `messages`) is rejected with `400` before any model is called.
 - Successful responses include `X-Router-Model` (who answered) and `X-Router-Attempts` (who was skipped, with status codes).
@@ -137,12 +140,13 @@ src/free_router/
   sync.py            finds free models and records changes
   autosync.py        background syncing while the server runs
   routing.py         the fallback loop
+  sse.py             incremental server-sent-events parser
   capabilities.py    which models can serve a request; output-limit fitting
   health.py          per-model cooldowns and reliability ordering
   query.py           ask one prompt from Python
   cli.py             the `free-router` command
   adapters/
-    anthropic.py     Anthropic <-> OpenAI request/response translation
+    anthropic.py     Anthropic <-> OpenAI request/response/stream translation
   api/
     app.py           FastAPI app and middleware
     errors.py        OpenAI- and Anthropic-shaped error responses

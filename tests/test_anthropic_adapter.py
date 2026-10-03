@@ -150,30 +150,13 @@ def test_list_content_is_joined() -> None:
     assert anthropic.response_to_anthropic(data, "m")["content"][0]["text"] == "ab"
 
 
-def test_stream_events_follow_the_spec() -> None:
+def test_tool_use_stop_reason_even_if_provider_says_stop() -> None:
     message = anthropic.response_to_anthropic(
         completion(
-            "Hello",
-            tool_calls=[
-                {"id": "c1", "function": {"name": "f", "arguments": '{"a":1}'}}
-            ],
+            tool_calls=[{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+            finish_reason="stop",
         ),
         "m",
     )
-    events = list(anthropic.stream_events(message))
 
-    assert [event["type"] for event in events] == [
-        "message_start",
-        "content_block_start",
-        "content_block_delta",
-        "content_block_stop",
-        "content_block_start",
-        "content_block_delta",
-        "content_block_stop",
-        "message_delta",
-        "message_stop",
-    ]
-    assert events[1]["content_block"] == {"type": "text", "text": ""}
-    assert events[2]["delta"] == {"type": "text_delta", "text": "Hello"}
-    assert events[4]["content_block"]["input"] == {}
-    assert json.loads(events[5]["delta"]["partial_json"]) == {"a": 1}
+    assert message["stop_reason"] == "tool_use"

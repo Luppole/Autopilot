@@ -17,18 +17,54 @@ MODELS = [
     {"id": "acme/gamma:free", "name": "Acme: Gamma (free)"},
 ]
 
-STREAM_BODY = b'event: x\ndata: {"delta":"hi"}\n\n: keep-alive\n\ndata: [DONE]\n\n'
+
+def sse(*events: Any) -> bytes:
+    """An OpenAI-style SSE body; dicts become JSON `data:` events."""
+
+    return b"".join(
+        b"data: "
+        + (event if isinstance(event, str) else json.dumps(event)).encode()
+        + b"\n\n"
+        for event in events
+    )
+
+
+def delta(**fields: Any) -> dict[str, Any]:
+    return {"choices": [{"delta": fields}]}
+
+
+# A realistic stream: a keep-alive comment, a role-only first chunk
+# (not output yet), a multi-line event, then text and a finish.
+STREAM_BODY = (
+    b": OPENROUTER PROCESSING\n\n"
+    + sse(delta(role="assistant", content=""))
+    + b'event: chunk\ndata: {"choices":\ndata: [{"delta":{"content":"hi"}}]}\n\n'
+    + sse(
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 5},
+        },
+        "[DONE]",
+    )
+)
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, body: Any = None, raw: bytes | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        body: Any = None,
+        raw: bytes | None = None,
+        stream: bytes = STREAM_BODY,
+    ):
         self.status_code = status_code
         self.ok = status_code < 400
         self._body = body
         self.text = raw.decode() if raw is not None else json.dumps(body)
         self.closed = False
-        # Set by FakeOpenRouter: a streaming request gets STREAM_BODY.
+        # Set by FakeOpenRouter: a streaming request gets `stream`.
         self.streaming = False
+        self.stream = stream
 
     def json(self) -> Any:
         return json.loads(self.text)
@@ -37,7 +73,7 @@ class FakeResponse:
         self.closed = True
 
     def iter_content(self, chunk_size: int | None = None) -> Iterator[bytes]:
-        body = STREAM_BODY if self.streaming else self.text.encode()
+        body = self.stream if self.streaming else self.text.encode()
         yield body[:10]
         yield body[10:]
 
