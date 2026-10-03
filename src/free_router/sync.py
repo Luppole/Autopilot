@@ -58,6 +58,9 @@ def normalize_model(model: Record, collected_at: str) -> Record:
         "context_length": model.get("context_length"),
         "architecture": model.get("architecture"),
         "pricing": model.get("pricing"),
+        # Used to skip models that can't handle a request (see capabilities).
+        "supported_parameters": model.get("supported_parameters"),
+        "top_provider": model.get("top_provider"),
         "created": model.get("created"),
         "updated": model.get("updated"),
         "collected_at": collected_at,

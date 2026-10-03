@@ -1,17 +1,18 @@
-"""Fallback routing: try free models in random order until one answers."""
+"""Fallback routing: try capable free models, healthiest first, until one answers."""
 
 import logging
-import random
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import requests
 
+from free_router import health
+from free_router.capabilities import estimate_prompt_tokens, fit_payload, unfit_reason
 from free_router.config import settings
 from free_router.errors import InvalidRequestError, NoModelsError, RouterError
 from free_router.openrouter import post_chat
-from free_router.storage import load_free_models
+from free_router.storage import Record, load_free_models
 
 log = logging.getLogger(__name__)
 
@@ -68,33 +69,49 @@ def _truncate(text: str) -> str:
     return text[:MAX_ERROR_LENGTH] + "…"
 
 
-def candidate_models(requested: str | None) -> list[str]:
+def candidate_models(payload: Payload, prompt_tokens: int) -> list[Record]:
     """The models to try, in order.
 
-    "auto" (or nothing) means every free model, shuffled so the same
-    one isn't hammered every time. An explicit id is tried alone, and
-    must be a known free model so a typo can't bill a paid one.
+    "auto" (or nothing) means every free model that can handle the
+    request, healthiest first (see `health.order`). An explicit id is
+    tried alone, and must be a known free model so a typo can't bill
+    a paid one.
     """
 
-    free_ids = [model["id"] for model in load_free_models()]
+    free_models = {model["id"]: model for model in load_free_models()}
 
-    if not free_ids:
+    if not free_models:
         raise NoModelsError("No free models found. Run `free-router sync` first.")
 
+    requested = payload.get("model")
+
     if requested and requested != "auto":
-        if requested not in free_ids:
+        if requested not in free_models:
             raise InvalidRequestError(
                 f'{requested!r} is not a known free model. Use "auto" '
                 "or an id from GET /v1/models."
             )
-        return [requested]
+        return [free_models[requested]]
 
-    random.shuffle(free_ids)
+    reasons = {
+        model_id: unfit_reason(model, payload, prompt_tokens)
+        for model_id, model in free_models.items()
+    }
+    fit_ids = [model_id for model_id, reason in reasons.items() if reason is None]
+
+    if not fit_ids:
+        details = "; ".join(f"{m} {r}" for m, r in reasons.items())
+        raise InvalidRequestError(
+            f"No free model can handle this request (about {prompt_tokens} "
+            f"prompt tokens): {details}."
+        )
+
+    ordered = health.order(fit_ids)
 
     if settings.max_attempts:
-        return free_ids[: settings.max_attempts]
+        ordered = ordered[: settings.max_attempts]
 
-    return free_ids
+    return [free_models[model_id] for model_id in ordered]
 
 
 def _open(model_id: str, payload: Payload, stream: bool) -> requests.Response:
@@ -149,21 +166,31 @@ def route(payload: Payload, stream: bool = False) -> RouteResult:
         raise InvalidRequestError("`messages` must be a non-empty list.")
 
     payload = {**payload, "stream": stream}
+    prompt_tokens = estimate_prompt_tokens(payload)
     attempts: list[Attempt] = []
 
-    for model_id in candidate_models(payload.get("model")):
+    for model in candidate_models(payload, prompt_tokens):
+        model_id = model["id"]
+        started = time.monotonic()
+
         try:
-            response = _open(model_id, payload, stream)
+            response = _open(
+                model_id, fit_payload(model, payload, prompt_tokens), stream
+            )
             data = None if stream else _parse(model_id, response)
         except _Miss as miss:
             log.info("%s skipped: %s", model_id, miss.attempt.status or miss)
             attempts.append(miss.attempt)
+
+            if health.is_model_failure(miss.attempt.status):
+                health.record_failure(model_id)
 
             if miss.attempt.status == 429:
                 time.sleep(settings.rate_limit_delay)
 
             continue
 
+        health.record_success(model_id, time.monotonic() - started)
         log.info("%s answered after %d skipped", model_id, len(attempts))
 
         if stream:

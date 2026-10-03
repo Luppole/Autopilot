@@ -56,7 +56,10 @@ The requested Claude model name is ignored and a free model is used instead. Too
 
 ## How routing works
 
-- `model: "auto"` (or no model) tries every free model in random order, so load is spread out instead of always hitting the same one.
+- `model: "auto"` (or no model) tries every free model that can handle the request:
+  - **Capability filtering:** models without tool support are skipped for requests with `tools`, text-only models for requests with images, and models whose context is too small for the prompt. If none fit, the request fails with `400` saying why. (This uses metadata saved by `free-router sync`; re-sync after upgrading.)
+  - **Health-aware order:** a model that just failed (network error, timeout, `429`, `5xx`) sits out a cooldown that starts at 10s and doubles per consecutive failure, up to 5 minutes. Models that answer reliably are tried earlier, but the order stays randomized so load is spread out. Cooling models are still tried last, so a request is never refused just because everything failed recently.
+  - **Output limit:** a `max_tokens` above what a model allows is lowered to fit, so a client asking for 32k tokens isn't rejected by an 8k model.
 - A specific model id is tried once, with no fallback. It must be one of the synced free models, so a typo can never send a request to a paid model on your key.
 - A non-2xx reply, a network error, a timeout, a non-JSON body or a reply with no choices counts as a miss, and the next model is tried. After a 429 there's a short pause first.
 - A malformed request (for example, no `messages`) is rejected with `400` before any model is called.
@@ -92,6 +95,7 @@ Errors use the shape each client already understands:
 | `GET` | `/` | Dashboard. |
 | `GET` | `/health`, `/api/status` | Health check and summary. |
 | `GET` | `/api/models`, `/api/history` | Full model details and the sync log. |
+| `GET` | `/api/model-health` | Per-model success/failure counts, latency, reliability score and remaining cooldown (in memory, since startup). |
 | `POST` | `/api/sync` | Runs a sync. |
 
 ## Configuration
@@ -127,6 +131,8 @@ src/free_router/
   openrouter.py      OpenRouter HTTP client
   sync.py            finds free models and records changes
   routing.py         the fallback loop
+  capabilities.py    which models can serve a request; output-limit fitting
+  health.py          per-model cooldowns and reliability ordering
   query.py           ask one prompt from Python
   cli.py             the `free-router` command
   adapters/

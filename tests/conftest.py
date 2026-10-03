@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from free_router import routing
+from free_router import health, routing
 from free_router.api.app import app
 from free_router.config import settings
 from free_router.storage import write_json
@@ -61,12 +61,14 @@ class FakeOpenRouter:
     def __init__(self) -> None:
         self.responses = [FakeResponse(200, completion())]
         self.calls: list[str] = []
+        self.payloads: list[dict[str, Any]] = []
 
     def reply(self, *responses: FakeResponse) -> None:
         self.responses = list(responses)
 
     def __call__(self, payload: dict[str, Any], stream: bool = False) -> FakeResponse:
         self.calls.append(payload["model"])
+        self.payloads.append(payload)
 
         if len(self.responses) > 1:
             return self.responses.pop(0)
@@ -82,6 +84,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(settings, "rate_limit_delay", 0)
     monkeypatch.setattr(settings, "max_attempts", 0)
     write_json(settings.models_file, MODELS)
+    health.reset()
 
     return tmp_path
 
