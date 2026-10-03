@@ -90,6 +90,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(settings, "rate_limit_delay", 0)
     monkeypatch.setattr(settings, "max_attempts", 0)
     monkeypatch.setattr(settings, "request_deadline", 0)
+    monkeypatch.setattr(settings, "sync_interval", 0)
     write_json(settings.models_file, MODELS)
     health.reset()
 

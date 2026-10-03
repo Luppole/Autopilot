@@ -1,3 +1,7 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,6 +10,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from free_router import __version__
 from free_router.api import anthropic, dashboard, openai
 from free_router.api.errors import error_response, register_error_handlers
+from free_router.autosync import AutoSync
 from free_router.config import APP_TITLE, WEB_DIR, settings
 
 
@@ -40,8 +45,20 @@ class RequireJSONMiddleware:
         await self.app(scope, receive, send)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    auto_sync = AutoSync(settings.sync_interval)
+    auto_sync.start()
+
+    try:
+        yield
+    finally:
+        # Joining blocks briefly; keep it off the event loop.
+        await asyncio.to_thread(auto_sync.stop)
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title=APP_TITLE, version=__version__)
+    app = FastAPI(title=APP_TITLE, version=__version__, lifespan=lifespan)
 
     register_error_handlers(app)
 

@@ -50,6 +50,8 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 class Settings:
     data_dir: Path = Path("data")
     history_limit: int = 90
+    # Seconds between automatic syncs while serving; 0 disables them.
+    sync_interval: float = 6 * 60 * 60
     # Seconds to wait on a single model before moving on.
     request_timeout: float = 300
     # Seconds to wait for a connection to OpenRouter.
@@ -80,6 +82,9 @@ class Settings:
             data_dir=Path(os.getenv("FREE_ROUTER_DATA_DIR") or defaults.data_dir),
             history_limit=int(
                 _env_number("FREE_ROUTER_HISTORY_LIMIT", defaults.history_limit)
+            ),
+            sync_interval=_env_number(
+                "FREE_ROUTER_SYNC_INTERVAL", defaults.sync_interval
             ),
             request_timeout=_env_number(
                 "FREE_ROUTER_REQUEST_TIMEOUT", defaults.request_timeout

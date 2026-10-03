@@ -26,7 +26,7 @@ free-router serve     # http://127.0.0.1:8000
 | Command | What it does |
 | --- | --- |
 | `free-router sync` | Fetches OpenRouter's model list and saves the free ones to `data/free-models.json`. Each sync is logged in `data/free-model-history.json` (last 90 kept). |
-| `free-router serve [--host] [--port] [--reload]` | Runs the router and dashboard. |
+| `free-router serve [--host] [--port] [--reload]` | Runs the router and dashboard, and keeps the model list fresh (see `FREE_ROUTER_SYNC_INTERVAL`). |
 | `free-router query "prompt" [--no-sync]` | Syncs, then prints one answer from whichever free model responds first. |
 
 `python -m free_router <command>` is equivalent. Add `-v` to log every model attempt.
@@ -112,6 +112,7 @@ Errors use the shape each client already understands:
 | `FREE_ROUTER_MAX_ATTEMPTS` | `0` | Models to try per request. `0` means all of them. |
 | `FREE_ROUTER_RATE_LIMIT_DELAY` | `0.5` | Seconds to pause after a 429. |
 | `FREE_ROUTER_HISTORY_LIMIT` | `90` | Sync log entries to keep. |
+| `FREE_ROUTER_SYNC_INTERVAL` | `21600` (6 hours) | Seconds between automatic syncs while serving. The server also syncs at startup if the last sync is older than this. A failed sync is retried after 5 minutes. `0` turns automatic syncing off. |
 | `FREE_ROUTER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | `Host` headers the server answers to. |
 
 ## Security
@@ -134,6 +135,7 @@ src/free_router/
   storage.py         JSON files on disk (atomic writes)
   openrouter.py      OpenRouter HTTP client
   sync.py            finds free models and records changes
+  autosync.py        background syncing while the server runs
   routing.py         the fallback loop
   capabilities.py    which models can serve a request; output-limit fitting
   health.py          per-model cooldowns and reliability ordering
